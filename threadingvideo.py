@@ -1,3 +1,5 @@
+"""단일 스크립트로 두 대의 카메라 영상을 녹화하고 업로드하는 예제."""
+
 import threading
 import cv2
 import obd
@@ -11,7 +13,11 @@ import asyncio
 from gyro_sensor import get_gyro_data  # gyro_sensor 모듈 import
 import subprocess
 from threading import Lock
+
+
 class VideoCaptureThread(threading.Thread):
+    """카메라 프레임을 읽고 충돌 시 녹화/업로드를 수행하는 스레드."""
+
     def __init__(self, src, width, height, frame_rate, video_directory, url, start_event, lock):
         super(VideoCaptureThread, self).__init__()
         self.start_event = start_event  # 스레드 시작 이벤트
@@ -32,7 +38,7 @@ class VideoCaptureThread(threading.Thread):
         self.running = True
         self.is_recording = False
         # 버퍼 크기를 2분치로 조정
-        self.frame_buffer = deque(maxlen=frame_rate * 120)  
+        self.frame_buffer = deque(maxlen=frame_rate * 120)
         self.press_time = None
         self.out = None
         self.frame = None
@@ -48,10 +54,14 @@ class VideoCaptureThread(threading.Thread):
         wiringpi.pinMode(self.pin, 0)  # 0은 입력 모드
         
     def prepare_directory(self):
+        """출력 디렉터리가 존재하지 않으면 생성합니다."""
+
         if not os.path.exists(self.video_directory):
-            os.makedirs(self.video_directory)  
-        
+            os.makedirs(self.video_directory)
+
     def run(self):
+        """카메라 프레임을 읽어 충돌 여부에 따라 녹화 상태를 제어합니다."""
+
         self.start_event.wait()  # 모든 스레드가 준비될 때까지 대기
         countdown = None
         warning_start_time = None
@@ -111,6 +121,8 @@ class VideoCaptureThread(threading.Thread):
             self.manage_recording(gray_frame)
 
     def handle_collision_detected(self):
+        """외부 충돌 이벤트를 처리해 녹화를 시작합니다."""
+
         if self.press_time is None:
             self.press_time = time.time()
         else:
@@ -121,6 +133,8 @@ class VideoCaptureThread(threading.Thread):
                 self.start_recording()
 
     def start_recording(self):
+        """충돌 시 녹화 상태를 활성화합니다."""
+
         if len(self.frame_buffer) < self.frame_rate * 60:
             print("Warning: 충돌 전 데이터가 1분보다 모자랍니다.")
         else:
@@ -129,12 +143,16 @@ class VideoCaptureThread(threading.Thread):
         self.record_start_time = time.time() - 60  # Adjust for pre-collision frames
 
     def manage_recording(self, gray_frame):
+        """프레임을 버퍼에 저장하고 일정 시간이 지나면 자동으로 종료합니다."""
+
         with self.lock:  # 프레임 버퍼에 접근하기 전에 Lock을 획득
             self.frame_buffer.append(gray_frame)
             if self.is_recording and (time.time() - self.record_start_time >= 120):
                 self.stop_recording()
 
     def stop_recording(self):
+        """녹화를 중단하고 파일 저장 및 업로드를 수행합니다."""
+
         print("Stopping recording and creating video...")
         self.is_recording = False
 
@@ -171,11 +189,15 @@ class VideoCaptureThread(threading.Thread):
             print(f"Failed to reencode video: {e}")
 
     def record_frame(self, gray_frame):
+        """VideoWriter를 초기화한 뒤 프레임을 기록합니다."""
+
         if self.out is None:
             self.prepare_video_file()
         self.out.write(gray_frame)
 
     def prepare_video_file(self):
+        """파일 이름을 생성하고 VideoWriter 객체를 초기화합니다."""
+
         timestamp = datetime.datetime.fromtimestamp(self.record_start_time + 60).strftime("%Y-%m-%d-%H-%M-%S")
         # Include the video_directory in the path to the video file
         self.video_filename = os.path.join(self.video_directory, f"{timestamp}.mp4")
@@ -189,6 +211,8 @@ class VideoCaptureThread(threading.Thread):
         
 
     async def send_video_to_server_async(self):
+        """메인 스레드를 차단하지 않고 업로드를 수행합니다."""
+
         if self.out:
             self.out.release()  # Release the video file
             self.out = None
@@ -196,6 +220,8 @@ class VideoCaptureThread(threading.Thread):
         threading.Thread(target=self.send_video_to_server, args=(self.video_filename,)).start()
 
     def send_video_to_server(self, filename):
+        """HTTP POST 요청으로 영상을 서버에 업로드합니다."""
+
         print("Preparing to send video...")
         try:
             if os.path.exists(filename) and os.path.getsize(filename) > 0:
@@ -210,11 +236,15 @@ class VideoCaptureThread(threading.Thread):
             print(f"Failed to send video: {e}")
 
     def stop(self):
+        """카메라 리소스를 해제하고 스레드를 종료합니다."""
+
         self.running = False
         if self.out:
             self.out.release()
         self.cap.release()
 def add_info_to_frame(frame, fps, obd_error_shown, obd_connected, obd_connection):
+    """프레임에 시간, FPS, OBD 데이터를 덧붙입니다."""
+
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cv2.putText(frame, current_time, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     cv2.putText(frame, f"FPS: {fps}", (500, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
@@ -245,9 +275,7 @@ def add_info_to_frame(frame, fps, obd_error_shown, obd_connected, obd_connection
     return frame, obd_error_shown
     
 def configure_camera(device, width=640, height=480, frame_rate=30):
-    """
-    카메라 설정을 초기화합니다.
-    """
+    """카메라 해상도와 프레임레이트를 설정합니다."""
     try:
         # 비디오 포맷 설정
         subprocess.run(['v4l2-ctl', '-d', device, '--set-fmt-video=width={},height={},pixelformat=0'.format(width, height)], check=True)
@@ -258,21 +286,22 @@ def configure_camera(device, width=640, height=480, frame_rate=30):
         print(f"Failed to configure camera {device}: {e}")
 
 def main():
+    """두 카메라 스레드를 실행하고 GUI에 실시간으로 표시합니다."""
 
     start_event = threading.Event()  # 스레드 시작을 위한 이벤트 생성
     frame_buffer_lock = Lock()  # 프레임 버퍼 동기화를 위한 Lock 객체 생성
     # 카메라 설정을 초기화합니다.
     configure_camera('/dev/video0', 640, 480, 30)
     configure_camera('/dev/video2', 640, 480, 30)
-    
+
     # 비디오 캡처 스레드 생성 및 시작
     pedal_thread = VideoCaptureThread(src=0, width=640, height=480, frame_rate=30, video_directory="pedalvideo", url="https://sw--zqbli.run.goorm.site/pedalvideo", start_event=start_event, lock=frame_buffer_lock)
     face_thread = VideoCaptureThread(src=2, width=640  , height=480, frame_rate=30, video_directory="facevideo", url="https://sw--zqbli.run.goorm.site/facevideo", start_event=start_event, lock=frame_buffer_lock)
-    
+
     pedal_thread.start()
     face_thread.start()
 
-     # 모든 스레드가 준비되었다고 가정하고 이벤트를 설정하여 동시에 시작하도록 함
+    # 모든 스레드가 준비되었다고 가정하고 이벤트를 설정하여 동시에 시작하도록 함
     start_event.set()
 
     # 동시에 두 비디오 스트림 보여주기

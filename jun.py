@@ -1,3 +1,5 @@
+"""주행 영상 기록, 센서 데이터 오버레이, 충돌 감지 등을 담당하는 메인 실행 스크립트."""
+
 import threading
 import cv2
 import obd
@@ -25,11 +27,14 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 
 
 class VideoCaptureThread(threading.Thread):
+    """카메라 프레임 캡처, 버퍼링, 충돌 시 녹화/전송을 담당하는 스레드."""
+
     def __init__(self, src, width, height, frame_rate, video_directory, url, start_event, lock, obd_connection, obd_connected):
         super(VideoCaptureThread, self).__init__()
         self.obd_connection = obd_connection
         self.obd_connected = obd_connected
-        self.start_event = start_event  # 스레드 시작 이벤트
+        # ``start_event``가 set될 때까지 대기하여 모든 스레드가 동시에 시작되도록 조정합니다.
+        self.start_event = start_event
         self.cap = cv2.VideoCapture(src)
         if not self.cap.isOpened():
             raise Exception("Error: Camera is not opened.")
@@ -45,10 +50,12 @@ class VideoCaptureThread(threading.Thread):
         self.prepare_directory()
         self.running = True
         self.is_recording = False
-        self.frame_buffer = deque(maxlen=frame_rate * 120)  # 버퍼 크기를 30초 치로 조정
+        # 충돌 전/후 영상을 저장하기 위한 고정 길이 버퍼 (최대 2분 분량).
+        self.frame_buffer = deque(maxlen=frame_rate * 120)
         self.press_time = None
         self.out = None
         self.frame = None
+        # OBD 연결 오류 메시지를 한 번만 출력하도록 제어합니다.
         self.obd_error_shown = False
         self.record_start_time = None
         self.warning_display_time = 3  # Warning 메시지를 표시할 시간 (초)
@@ -59,10 +66,14 @@ class VideoCaptureThread(threading.Thread):
         wiringpi.pinMode(self.pin, 0)  # 0은 입력 모드
 
     def prepare_directory(self):
+        """영상 파일을 저장할 디렉터리가 없으면 생성합니다."""
+
         if not os.path.exists(self.video_directory):
             os.makedirs(self.video_directory)
 
     def run(self):
+        """카메라에서 프레임을 읽고 충돌 여부에 따라 녹화를 제어합니다."""
+
         self.start_event.wait()  # 모든 스레드가 준비될 때까지 대기
         countdown = None
         warning_start_time = None
@@ -88,11 +99,13 @@ class VideoCaptureThread(threading.Thread):
                 warning_start_time = None  # Reset warning timer
 
             if self.src == 0:
+                # 페달 카메라 영상은 흑백으로 변환하고 OBD 정보를 오버레이합니다.
                 gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 self.frame = gray_frame
                 frame, self.obd_error_shown = add_info_to_frame(gray_frame, self.frame_rate, self.obd_error_shown,
                                                                 self.obd_connected, self.obd_connection)
             elif self.src == 2:
+                # 운전자 얼굴 카메라는 컬러 프레임을 유지하며 자이로 데이터를 함께 표기합니다.
                 gray_frame = frame
                 self.frame = gray_frame
                 gyro_data = get_gyro_data()
@@ -112,6 +125,8 @@ class VideoCaptureThread(threading.Thread):
             self.manage_recording(gray_frame)
 
     def handle_collision_detected(self):
+        """외부에서 충돌 감지 알림을 받을 경우 녹화 타이머를 조정합니다."""
+
         if self.press_time is None:
             self.press_time = time.time()
         else:
@@ -122,6 +137,8 @@ class VideoCaptureThread(threading.Thread):
                 self.start_recording()
 
     def start_recording(self):
+        """충돌 감지 시 버퍼에 쌓인 프레임과 이후 프레임을 저장합니다."""
+
         if len(self.frame_buffer) < self.frame_rate * 60:
             print("Warning: Insufficient pre-collision data.")
         else:
@@ -130,6 +147,8 @@ class VideoCaptureThread(threading.Thread):
         self.record_start_time = time.time() - 60  # Adjust for pre-collision frames
 
     def manage_recording(self, gray_frame):
+        """프레임 버퍼를 관리하고 2분 이후 자동으로 녹화를 종료합니다."""
+
         with self.lock:
             self.frame_buffer.append(gray_frame)
             # 버퍼에 프레임 추가 시 로그 출력
@@ -140,6 +159,8 @@ class VideoCaptureThread(threading.Thread):
                 #logging.debug('Stopping recording after 30 seconds.')
 
     def stop_recording(self):
+        """녹화를 종료하고, 파일 저장 및 서버 전송까지 수행합니다."""
+
         print("Stopping recording and creating video...")
         self.is_recording = False
         self.prepare_video_file()
@@ -169,11 +190,15 @@ class VideoCaptureThread(threading.Thread):
             print(f"Failed to reencode video: {e}")
 
     def record_frame(self, gray_frame):
+        """VideoWriter에 현재 프레임을 기록합니다."""
+
         if self.out is None:
             self.prepare_video_file()
         self.out.write(gray_frame)
 
     def prepare_video_file(self):
+        """버퍼에 저장된 프레임을 쓰기 위한 VideoWriter를 초기화합니다."""
+
         timestamp = datetime.datetime.fromtimestamp(self.record_start_time + 15).strftime("%Y-%m-%d-%H-%M-%S")
         self.video_filename = os.path.join(self.video_directory, f"{timestamp}.mp4")
         if self.src == 0:
@@ -182,12 +207,16 @@ class VideoCaptureThread(threading.Thread):
             self.out = cv2.VideoWriter(self.video_filename, self.fourcc, self.frame_rate, (self.width, self.height))
 
     async def send_video_to_server_async(self):
+        """비동기 전송 헬퍼: 메인 스레드를 차단하지 않도록 별도 스레드에서 업로드합니다."""
+
         if self.out:
             self.out.release()
             self.out = None
         threading.Thread(target=self.send_video_to_server, args=(self.video_filename,)).start()
 
     def send_video_to_server(self, filename):
+        """녹화된 영상을 HTTP POST로 업로드합니다."""
+
         print("Preparing to send video...")
         try:
             if os.path.exists(filename) and os.path.getsize(filename) > 0:
@@ -202,6 +231,8 @@ class VideoCaptureThread(threading.Thread):
             print(f"Failed to send video: {e}")
 
     def stop(self):
+        """카메라 장치를 해제하고 스레드를 종료합니다."""
+
         self.running = False
         if self.out:
             self.out.release()
@@ -209,10 +240,13 @@ class VideoCaptureThread(threading.Thread):
 
 
 def add_info_to_frame(frame, fps, obd_error_shown, obd_connected, obd_connection):
+    """영상 프레임에 시간, FPS, OBD 데이터를 오버레이합니다."""
+
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cv2.putText(frame, current_time, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     cv2.putText(frame, f"FPS: {fps}", (500, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
+    # 기본 표시 값은 "N/A"로 채워 사용자가 연결 상태를 쉽게 이해하도록 합니다.
     speed_text = rpm_text = throttle_text = load_text = "N/A"
 
     if obd_connected and obd_connection and obd_connection.is_connected():
@@ -233,6 +267,8 @@ def add_info_to_frame(frame, fps, obd_error_shown, obd_connected, obd_connection
 
 
 def configure_camera(device, width=640, height=480, frame_rate=30):
+    """v4l2-ctl 명령을 이용해 카메라 해상도 및 FPS를 설정합니다."""
+
     try:
         subprocess.run(['v4l2-ctl', '-d', device, '--set-fmt-video=width={},height={},pixelformat=0'.format(width, height)], check=True)
         subprocess.run(['v4l2-ctl', '-d', device, '--set-parm={}'.format(frame_rate)], check=True)
@@ -242,6 +278,8 @@ def configure_camera(device, width=640, height=480, frame_rate=30):
 
 
 def main():
+    """OBD 연결을 초기화하고 두 대의 카메라 녹화 스레드를 실행합니다."""
+
     obd_connection = None
     obd_connected = False
     obd_conn = OBDConnection()
@@ -249,6 +287,7 @@ def main():
     if obd_conn.obd_connected:
         obd_connection = obd_conn.obd_connection
         obd_connected = obd_conn.obd_connected
+    # 비동기 OBD 연결에 콜백을 등록하여 실시간 데이터를 수신합니다.
     OBDModules.ecu_connections(obd_conn.obd_connection)
 
     start_event = threading.Event()
@@ -268,6 +307,7 @@ def main():
     start_event.set()
 
     while pedal_thread.is_alive() or face_thread.is_alive():
+        # 최신 프레임을 GUI 창에 표시합니다.
         if pedal_thread.frame is not None:
             pedal_frame = cv2.resize(pedal_thread.frame, (640, 480))
             cv2.imshow('Pedal Video Recorder', pedal_frame)
@@ -275,6 +315,7 @@ def main():
             face_frame = cv2.resize(face_thread.frame, (640, 480))
             cv2.imshow('Face Video Recorder', face_frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
+            # 사용자가 'q' 키를 누르면 모든 스레드를 종료합니다.
             if pedal_thread.is_alive():
                 pedal_thread.stop()
             if face_thread.is_alive():
